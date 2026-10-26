@@ -1,0 +1,29 @@
+# ===== 构建产物（绝不进仓库）=====
+.build/
+build/
+*.dmg
+
+# ===== 密钥 / 证书（最高优先级：私钥绝不外传）=====
+# Developer ID 签名私钥、证书、API 密钥等一旦进仓库即永久泄露，必须物理隔离在本机。
+*.p12
+*.pfx
+*.cer
+*.crt
+*.key
+*.pem
+*.der
+AuthKey_*.p8
+certs/
+keys/
+secrets/
+*.secret
+notary.env
+
+# ===== 系统 / 编辑器杂项 =====
+.DS_Store
+*.swp
+*~
+
+# ===== SwiftPM 本地缓存 =====
+.swiftpm/xcode/
+.swiftpm/configuration/
