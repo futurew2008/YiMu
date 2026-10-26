@@ -2,18 +2,5 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-	  译幕 YiMu 的授权文件（entitlements）。
-
-	  关键决策：
-	  1. 故意【不】启用 App Sandbox（com.apple.security.app-sandbox）。
-	     原因：译幕依赖「辅助功能 API（Accessibility）」读取别家 app 的界面文本，
-	     而 App Sandbox 在禁用清单第一条就禁止辅助功能 API，且 Mac App Store 强制沙箱。
-	     因此译幕无法上架 Mac App Store，改走 Developer ID 签名 + 苹果公证分发。
-	  2. Hardened Runtime 由 build-app.sh 的 `codesign --options runtime` 启用，
-	     不在此文件用密钥声明（它是 codesign 选项，不是 entitlement 键）。
-	  3. 本 app 为纯 Swift、自包含，无需 JIT / dyld 注入 / 第三方 dylib，
-	     故无需 allow-jit / disable-library-validation 等放行键。
-	-->
 </dict>
 </plist>

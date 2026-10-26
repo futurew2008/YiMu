@@ -1332,6 +1332,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
         self.statusItem = item
         refreshStatusMenu()
+        // 监听后端切换（设置页写入 UserDefaults）→ 实时刷新「数据已外发」云标识。
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
+                                              object: nil, queue: .main) { [weak self] _ in
+            self?.refreshStatusBarBadge()
+        }
+    }
+
+    /// 菜单栏按钮在「数据会外发」的引擎下显示 ☁，否则清空。
+    /// 这是对你隐私红线的兜底：无论何时，一眼知道此刻翻译是否走云端。
+    private func refreshStatusBarBadge() {
+        guard let button = statusItem?.button else { return }
+        button.title = Preferences.shared.translationBackend.sendsDataOffDevice ? "  ☁" : ""
     }
 
     /// 根据当前状态刷新菜单的动态文案（模式名 + 暂停/恢复）。
@@ -1360,6 +1372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 融合态角落 HUD 的暂停图标也要跟着变：从菜单栏 / 热键切暂停时，
         // 旧实现只刷新菜单栏标题，HUD 上仍显示旧图标（点一下反而是相反的动作）。
         FusionHUD.shared.refresh()
+        // 「数据已外发」云标识随后端实时更新。
+        refreshStatusBarBadge()
         // 语言包缺失：菜单里安静提示（绝不自动弹系统下载框）
         let msg = MainActor.assumeIsolated { Translator.shared.missingNotice }
         if let msg {

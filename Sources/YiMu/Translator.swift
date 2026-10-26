@@ -265,6 +265,9 @@ final class Translator {
 
     /// 一次引擎调用翻整批；失败降级为逐条（每条自带 1 次重试）。
     ///
+    /// **云端分支（2026-10-14）**：后端不是 `.apple` 时整批交给 `CloudTranslator`，
+    /// 不经 Apple 会话、不做语言包预检（云端自带自动检测）。原文会发往对应服务商。
+    ///
     /// **语言策略（修复两个用户报告的 BUG）**
     /// - 反复弹「选择语言」：根因是用 nil 源建会话，系统检测失败就弹模态框。
     ///   现改为本地 `NLLanguageRecognizer` 逐条检测、按语言分组，每组用**确定源语言**的会话翻。
@@ -272,6 +275,13 @@ final class Translator {
     ///   检测出其他受支持语言的文本照样分组翻译，不再被限定。
     /// - 检测结果 == 目标语言 → 无需翻译，直接原文返回（上层静默不显示）。
     private func translateBatch(_ batch: [(text: String, cont: CheckedContinuation<String, Never>)]) async {
+        // —— 云端分支（2026-10-14）——
+        // 非 Apple 后端：整批交给云端翻译，跳过 Apple 会话与语言包预检。
+        if Preferences.shared.translationBackend != .apple {
+            await translateBatchCloud(batch)
+            return
+        }
+
         // 1) 本地语言检测，按源语言分组（全部本地完成，零弹窗、零外发）
         var groups: [String: [(text: String, cont: CheckedContinuation<String, Never>)]] = [:]
         let dominant = dominantLanguage(of: batch.map { $0.text })
@@ -301,6 +311,41 @@ final class Translator {
                 continue
             }
             await runGroup(jobs)
+        }
+    }
+
+    // MARK: - 云端批量翻译（非 Apple 引擎）
+
+    /// 把整批直接发给云端翻译器；输入/输出按下标对齐。
+    /// 失败（无 key / 网络 / 限流）时整批回退原文，绝不卡死队列。
+    private func translateBatchCloud(_ batch: [(text: String, cont: CheckedContinuation<String, Never>)]) async {
+        let backend = Preferences.shared.translationBackend
+        let target = preparedTarget?.minimalIdentifier ?? targetCode
+        let texts = batch.map { $0.text }
+        // 用本批主流语言作 source；若等于目标语言则让云端自动检测（传 nil）。
+        let dominant = dominantLanguage(of: texts)
+        let source: String? = (dominant == target) ? nil : dominant
+
+        let results: [String]
+        do {
+            let key = KeychainHelper.get(backend.keychainService) ?? ""
+            if backend == .microsoft {
+                results = try await CloudTranslator.translate(texts, from: source, to: target,
+                                                            backend: backend, apiKey: key,
+                                                            region: Preferences.shared.microsoftRegion)
+            } else {
+                results = try await CloudTranslator.translate(texts, from: source, to: target,
+                                                            backend: backend, apiKey: key)
+            }
+        } catch {
+            for job in batch { job.cont.resume(returning: job.text) }
+            return
+        }
+
+        for (i, job) in batch.enumerated() {
+            let out = (i < results.count && !results[i].isEmpty) ? results[i] : job.text
+            if out != job.text { store(cacheKey(job.text), out) }
+            job.cont.resume(returning: out)
         }
     }
 
@@ -546,10 +591,14 @@ final class Translator {
     /// 最长 970 字符，混有 OCR 扫到的桌面私人文件名）。该文件随 Time Machine / 备份整份带走，
     /// 等于本机长期留存一份「屏幕内容语料」。改 hash 后：同文照样命中（命中率完全不变），
     /// 但**反查不出原文**，泄漏面降到零。译文（缓存值）仍需保留，那是缓存本身的意义所在。
+    ///
+    /// **2026-10-14**：前缀额外带上后端标识，避免不同引擎对同文给出不同译文时互相串缓存
+    /// （例如 Apple 的「你好」与 DeepL 的「您好」不应共享一条缓存）。
     private func cacheKey(_ text: String) -> String {
         let src = preparedSource?.minimalIdentifier ?? "auto"
         let tgt = preparedTarget?.minimalIdentifier ?? "zh-Hans"
-        return Self.hashedKey(dirPrefix: "\(src)>\(tgt)", text: text)
+        let be = Preferences.shared.translationBackend.rawValue
+        return Self.hashedKey(dirPrefix: "\(be)|\(src)>\(tgt)", text: text)
     }
 
     /// 语言方向前缀 + 原文 SHA-256。`h1:` 为新格式（哈希）标记，旧格式没有它。
