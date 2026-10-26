@@ -17,9 +17,10 @@ private func _CGWindowListCreateImage(
     _ imageOption: CGWindowImageOption
 ) -> Unmanaged<CGImage>?
 
-/// 点击穿透容器：仅在「设置态」正常交互；镜头/融合态下除融按钮外全部穿透到下层 app。
+/// 点击穿透容器：仅在「设置态」正常交互；镜头/融合态下除自绘四按钮组外全部穿透到下层 app。
 final class ClickThroughContainer: NSView {
-    weak var fuseButton: NSView?
+    /// 【A 方案】自绘四按钮组（关闭/最小化/缩放/屏幕融合），接管原生红绿灯。
+    weak var trafficCluster: TrafficClusterView?
     var mode: AppState = .settings
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -27,14 +28,9 @@ final class ClickThroughContainer: NSView {
 
         let pWin = convert(point, to: nil)
 
-        // 融合按钮：所有非设置态都可点（镜头态显示，融合 / 区域态隐藏）。
-        // 注意：融按钮已挂进红绿灯所在的控件组，其 frame 属**该父视图**坐标系，
-        // 而这里的 point 是容器坐标系 —— 两者空间不同，必须统一换算到窗口坐标再比较，
-        // 否则这里会拿错误的矩形做判定（直接 `fb.frame.contains(point)` 是错的）。
-        if let fb = fuseButton, !fb.isHidden, let sup = fb.superview {
-            let fbWin = sup.convert(fb.frame, to: nil)
-            if fbWin.contains(pWin) { return fb }
-        }
+        // 自绘四按钮组：非设置态下也必须可点（原生红绿灯已永久隐藏，功能全靠它）。
+        // 逐个按钮精确判定，按钮之间的缝隙不吞事件 —— 缝隙区仍可拖动控制栏。
+        if let btn = trafficCluster?.buttonAt(windowPoint: pWin) { return btn }
 
         guard mode == .lens else { return nil }   // 融合 / 区域：全透
 
@@ -48,18 +44,7 @@ final class ClickThroughContainer: NSView {
 
         let barTop = b.height - Self.lensBarHeight
         if pWin.y >= barTop {
-            if let win = self.window,
-               let c = win.standardWindowButton(.closeButton),
-               let m = win.standardWindowButton(.miniaturizeButton),
-               let z = win.standardWindowButton(.zoomButton),
-               let csup = c.superview, let msup = m.superview, let zsup = z.superview {
-                let cf = csup.convert(c.frame, to: nil)
-                let mf = msup.convert(m.frame, to: nil)
-                let zf = zsup.convert(z.frame, to: nil)
-                if [cf, mf, zf].contains(where: { $0.contains(pWin) }) {
-                    return super.hitTest(point)   // 红绿灯可点
-                }
-            }
+            // 注：原生红绿灯已由自绘四按钮组接管（见上方 trafficCluster 判定）。
             return self   // 控制栏空白处：拖动窗口
         }
         return nil   // 框内：完全穿透
@@ -74,13 +59,309 @@ final class PassThroughView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+// MARK: - 自绘四按钮组（关闭 / 最小化 / 缩放 / 屏幕融合）
+
+/// 组内按钮种类。配色取 macOS 原生红绿灯观感；符号色为各自深色调（亮底看得出）。
+enum TrafficKind: CaseIterable {
+    case close, miniaturize, zoom, fusion
+
+    /// 窗口激活 / 悬停时的实心圆填充色（前三个对齐系统红绿灯标准色）。
+    var activeFill: NSColor {
+        switch self {
+        case .close:       return NSColor(srgbRed: 0xFF/255, green: 0x5F/255, blue: 0x57/255, alpha: 1)
+        case .miniaturize: return NSColor(srgbRed: 0xFE/255, green: 0xBC/255, blue: 0x2E/255, alpha: 1)
+        case .zoom:        return NSColor(srgbRed: 0x28/255, green: 0xC8/255, blue: 0x40/255, alpha: 1)
+        case .fusion:      return NSColor.controlAccentColor
+        }
+    }
+
+    /// 符号色：原生 macOS 用的是各按钮的深色调版本。
+    /// **融按钮例外——深色深蓝**（2026-10-27 用户逐轮定色，务必保留）。
+    var glyphColor: NSColor {
+        switch self {
+        case .close:       return NSColor(srgbRed: 0.30, green: 0.05, blue: 0.06, alpha: 1)
+        case .miniaturize: return NSColor(srgbRed: 0.32, green: 0.22, blue: 0.02, alpha: 1)
+        case .zoom:        return NSColor(srgbRed: 0.04, green: 0.25, blue: 0.06, alpha: 1)
+        case .fusion:      return ArrowGlyphView.glyphColor
+        }
+    }
+
+    var tooltip: String {
+        switch self {
+        case .close:       return L10n.s("关闭", "Close")
+        case .miniaturize: return L10n.s("最小化", "Minimize")
+        case .zoom:        return L10n.s("画框最大化", "Frame Maximize")   // 2026-10-27 用户定的新功能
+        case .fusion:      return L10n.s("屏幕融合（⌘⇧F）", "Fusion (⌘⇧F)")
+        }
+    }
+}
+
+/// 【A 方案 / 2026-10-27】自绘标题栏四按钮组：接管 macOS 原生红绿灯。
+///
+/// 为什么必须自绘（已排除的两条错路，勿回退）：
+/// 1. 「把第四个按钮塞进原生同一父视图」—— macOS 的 hover 揭示由 NSThemeFrame 内部
+///    tracking 区域驱动，**该区域只覆盖原生那三个按钮**，「同父」不等于「同组」。
+/// 2. 「向原生按钮转发合成的 mouseEntered」—— 实测用户端无效，AppKit 不采纳。
+///
+/// 业界标准解法（Tweetbot / Reminders 同款）：隐藏原生按钮、整组自绘 ——
+/// 「拿到按钮，从此你拥有它们的尺寸、颜色与 hover 行为」。
+/// **铁律：绝不在原生按钮之上绘制任何东西**（会重影、错位、随系统版本必崩）。
+final class TrafficClusterView: NSView {
+    private(set) var buttons: [TrafficKind: TrafficButton] = [:]
+
+    /// 组内 hover 广播（业界解法的核心）：光标落在**任一**按钮上 → 四个符号一起揭示、一起消失。
+    private var groupHovered = false {
+        didSet {
+            guard groupHovered != oldValue else { return }
+            for b in buttons.values { b.setHovered(groupHovered) }
+        }
+    }
+    func setHovered(_ v: Bool) { groupHovered = v }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        for kind in TrafficKind.allCases {
+            let b = TrafficButton(kind: kind)
+            b.target = self
+            b.action = #selector(buttonTapped(_:))
+            addSubview(b)
+            buttons[kind] = b
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    /// 按四个按钮的真实中心点重排（centersX / centerY 均为**本视图本地坐标**）。
+    /// size 取自原生红绿灯的真实尺寸，四者同制式。
+    func layoutButtons(centersX: [CGFloat], centerY: CGFloat, size: CGFloat) {
+        let order: [TrafficKind] = [.close, .miniaturize, .zoom, .fusion]
+        for (i, kind) in order.enumerated() {
+            guard let b = buttons[kind], i < centersX.count else { continue }
+            b.frame = NSRect(x: centersX[i] - size / 2, y: centerY - size / 2,
+                             width: size, height: size)
+            b.refreshAppearance()
+        }
+    }
+
+    /// 窗口 key 态 / 深浅色变化时整组刷新配色。
+    func refreshColors() { for b in buttons.values { b.refreshAppearance() } }
+
+    /// 按**窗口坐标**查找命中的按钮（供 ClickThroughContainer.hitTest 精确判定，
+    /// 按钮之间的缝隙不吞事件，缝隙区仍可拖动控制栏）。
+    func buttonAt(windowPoint p: NSPoint) -> NSView? {
+        guard !isHidden else { return nil }
+        let local = convert(p, from: nil)   // from: nil = 窗口坐标系
+        for b in buttons.values where !b.isHidden {
+            if b.frame.insetBy(dx: -1.5, dy: -1.5).contains(local) { return b }
+        }
+        return nil
+    }
+
+    @objc private func buttonTapped(_ sender: TrafficButton) {
+        guard let win = window else { return }
+        switch sender.kind {
+        case .close:       win.performClose(nil)
+        case .miniaturize: win.performMiniaturize(nil)
+        case .zoom:        AppDelegate.shared?.enterLensMaximized()   // 2026-10-27：+ 改为「画框最大化」
+        case .fusion:      AppDelegate.shared?.enterFusion()
+        }
+    }
+}
+
+/// 组内单个圆点按钮：纯色圆 + 悬停揭示符号；尺寸/配色/符号全部自绘，四者同制式。
+final class TrafficButton: NSButton {
+    let kind: TrafficKind
+    private var hovered = false
+    private let glyphView: NSView
+    /// 外环图层：沿圆点最外缘描一圈**比自身颜色更深**的细环（独立图层，
+    /// 因为 layer.borderWidth + masksToBounds 只能画在圆内且会被 mask 裁掉半边）。
+    private let ringLayer = CAShapeLayer()
+    /// 外环线宽（pt）：用户要求 1~2px，取中间值。调粗细只改这一个常量。
+    static let ringWidth: CGFloat = 1.5
+    /// 相对自身颜色的加深比例：0 = 同色（无感），越大越深。
+    static let ringDarken: CGFloat = 0.28
+
+    init(kind: TrafficKind) {
+        self.kind = kind
+        switch kind {
+        case .close:       glyphView = LineGlyphView(shape: .cross)
+        case .miniaturize: glyphView = LineGlyphView(shape: .minus)
+        case .zoom:        glyphView = LineGlyphView(shape: .plus)
+        case .fusion:      glyphView = ArrowGlyphView()
+        }
+        (glyphView as? LineGlyphView)?.color = kind.glyphColor
+        glyphView.isHidden = true
+        super.init(frame: .zero)
+        title = ""                    // 与红绿灯统一：纯圆点，不写字
+        isBordered = false
+        wantsLayer = true
+        toolTip = kind.tooltip
+        addSubview(glyphView)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    func setHovered(_ v: Bool) {
+        guard hovered != v else { return }
+        hovered = v
+        glyphView.isHidden = !v
+        refreshAppearance()
+    }
+
+    func refreshAppearance() {
+        wantsLayer = true
+        // 圆角必须在 wantsLayer 之后设（17:xx 方形 bug 根因：layer 为 nil 时设会被丢掉）
+        layer?.masksToBounds = true
+        layer?.cornerRadius = max(bounds.width, 1) / 2
+        let isKey = window?.isKeyWindow ?? false
+        let base = (isKey || hovered) ? kind.activeFill : Self.inactiveFill
+        layer?.backgroundColor = base.cgColor
+        layer?.borderWidth = 0          // 不再用 layer.border（画不准且被 mask 裁）
+        updateRing(base: base)
+    }
+
+    /// 给圆点套一圈「比自己颜色更深」的外环；环带外缘贴齐圆点最外沿。
+    /// base 取当前实际填充色 ⇒ 激活色、失焦灰、深/浅色模式切换都能自动跟随。
+    private func updateRing(base: NSColor) {
+        guard let layer, bounds.width > 1 else { return }
+        if ringLayer.superlayer !== layer { layer.addSublayer(ringLayer) }
+        let lw = Self.ringWidth
+        let r = max(bounds.width - lw, 1) / 2    // 描边以路径为中心，故半径内缩 lw/2
+        let path = CGMutablePath()
+        path.addEllipse(in: NSRect(x: bounds.midX - r, y: bounds.midY - r,
+                                   width: r * 2, height: r * 2))
+        ringLayer.path = path
+        ringLayer.fillColor = nil
+        ringLayer.lineWidth = lw
+        ringLayer.strokeColor = base.blended(withFraction: Self.ringDarken, of: .black)?.cgColor
+        // 压在符号之下：符号图层后加则在最上层，环不会盖住 ×/−/+/双三角
+        ringLayer.zPosition = -1
+        // 注：符号层（glyphView.layer）的 zPosition 默认 0 > −1，故环在下、符号在上
+    }
+
+    /// 失焦填充/外环，跟随深/浅色模式动态变化。
+    static let inactiveFill = NSColor(name: nil) { ap in
+        ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(white: 0.32, alpha: 1) : NSColor(white: 0.80, alpha: 1)
+    }
+    static let inactiveRing = NSColor(name: nil) { ap in
+        ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(white: 0.45, alpha: 1) : NSColor(white: 0.68, alpha: 1)
+    }
+
+    /// frame 变化后重算圆角 + 外环路径（按钮尺寸在 layoutButtons 里由真实红绿灯尺寸定，
+    /// 首次 layout 时才有正确的 bounds）。
+    override func layout() {
+        super.layout()
+        glyphView.frame = bounds
+        refreshAppearance()
+    }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); refreshAppearance() }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
+    }
+}
+
+/// × / − / + 三个原生符号的自绘替代：**线描**、圆头圆角、各自深色调。
+/// 尺寸随按钮直径按比例缩放（原生 14pt → 臂长约 5pt、线宽约 1.4pt）。
+final class LineGlyphView: NSView {
+    enum Shape { case cross, minus, plus }
+    let shape: Shape
+    var color: NSColor = .black
+
+    init(shape: Shape) { self.shape = shape; super.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+    override var isFlipped: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let b = bounds
+        let s = min(b.width, b.height)
+        // 2026-10-27 用户：「− / + 再大一点」→ arm 比例 0.36 → 0.50
+        //（14pt 按钮：全长 5.0 → 7.0pt）。× 维持原比例，否则四个符号视觉失衡。
+        let arm = s * (shape == .cross ? 0.36 : 0.50)
+        let lw = max(s * 0.115, 1.4)    // 线宽同比略加粗（14pt 按钮 → 1.6pt）
+        let cx = b.midX, cy = b.midY
+        ctx.saveGState()
+        ctx.setStrokeColor(color.cgColor)
+        ctx.setLineWidth(lw)
+        ctx.setLineCap(.round)
+        let h = arm / 2
+        switch shape {
+        case .minus, .plus:
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: cx - h, y: cy)); ctx.addLine(to: CGPoint(x: cx + h, y: cy))
+            if shape == .plus {
+                ctx.move(to: CGPoint(x: cx, y: cy - h)); ctx.addLine(to: CGPoint(x: cx, y: cy + h))
+            }
+            ctx.strokePath()
+        case .cross:
+            let d = h                    // 对角半长（视觉上与 − / + 等幅）
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: cx - d, y: cy - d)); ctx.addLine(to: CGPoint(x: cx + d, y: cy + d))
+            ctx.move(to: CGPoint(x: cx - d, y: cy + d)); ctx.addLine(to: CGPoint(x: cx + d, y: cy - d))
+            ctx.strokePath()
+        }
+        ctx.restoreGState()
+    }
+}
+
+/// 自绘「向两端扩展」符号（第四个按钮专用）：**两个等腰直角三角形**，尖端朝左右两侧、
+/// 中间留缝、无横轴；整体再**逆时针旋转 45°**（2026-10-27 用户选形），
+/// 使之沿「左下 ↔ 右上」对角线向两端张开。
+/// 等腰直角校验：直角顶点在尖端，两条直角边水平/竖直各长 w、斜边长 w·√2。
+final class ArrowGlyphView: NSView {
+    /// 符号填充色：**更深蓝**（2026-10-27 用户选「更深」档）。想调深浅只改这一个常量。
+    static let glyphColor = NSColor(srgbRed: 0.04, green: 0.16, blue: 0.47, alpha: 1)
+
+    /// 固定不翻转 ⇒ 坐标 y 轴向上，ctx.rotate 的正角度即为视觉「逆时针」，方向可预测。
+    override var isFlipped: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        // 用户在 12pt 按钮上调定的数值（w=3.5 / gap=2.2）按直径等比缩放，
+        // 这样按钮从 12pt 换成原生 14pt 后观感不变，不必重调。
+        let scale = min(bounds.width, bounds.height) / 12.0
+        let w: CGFloat = 3.5 * scale    // 直角边长（三角大小）
+        let gap: CGFloat = 2.2 * scale  // 两三角之间的缝（保证无横轴 / 无尾巴）
+        // 尺寸上限校验（12pt 基准）：最远角点距圆心 √(4.6²+3.5²)=5.78 < 半径 6 ✓；
+        // 旋转 45° 后半幅 (4.6+3.5)/√2=5.73 < 半宽 6 ✓。再大会顶到圆边被裁切。
+
+        ctx.saveGState()
+        ctx.translateBy(x: bounds.midX, y: bounds.midY)
+        ctx.rotate(by: .pi / 4)   // 逆时针 45°
+        ctx.setFillColor(Self.glyphColor.cgColor)
+
+        // 左三角：直角尖朝 -x（旋转后指向左下）
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: -(w + gap / 2), y: 0))
+        ctx.addLine(to: CGPoint(x: -gap / 2, y: w))
+        ctx.addLine(to: CGPoint(x: -gap / 2, y: -w))
+        ctx.closePath()
+        ctx.fillPath()
+
+        // 右三角：直角尖朝 +x（旋转后指向右上）
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: w + gap / 2, y: 0))
+        ctx.addLine(to: CGPoint(x: gap / 2, y: w))
+        ctx.addLine(to: CGPoint(x: gap / 2, y: -w))
+        ctx.closePath()
+        ctx.fillPath()
+
+        ctx.restoreGState()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var shared: AppDelegate?
 
     private var overlayWindow: NSWindow!
     private var container: ClickThroughContainer!
     private var overlayView: TranslationOverlayView!
-    private var fuseButton: NSButton!
+    /// 【A 方案 / 2026-10-27】自绘四按钮组（关闭 / 最小化 / 缩放 / 屏幕融合），
+    /// 已接管原生红绿灯：原生三个永久隐藏，由本组负责外观与悬停联动。
+    private var trafficCluster: TrafficClusterView!
     /// 设置态的窗口磨砂底：铺满整窗（含标题栏区域），
     /// 否则 SwiftUI 内容受安全区约束，标题栏那一横条会完全透明、透出桌面。
     private var windowBackdrop: NSVisualEffectView!
@@ -184,7 +465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayView.wantsLayer = true
         overlayView.layer?.masksToBounds = true
 
-        fuseButton = makeFuseButton()
+        // 【A 方案】自绘四按钮组：接管 macOS 原生红绿灯（原生三个之后在 setTrafficLights 里永久隐藏），
+        // 悬停组内任一按钮 → 四个符号一起揭示；真正的一家人，不再受系统 tracking 区域限制。
+        trafficCluster = TrafficClusterView()
 
         // 设置态窗口底：真正的磨砂玻璃，铺满整窗（含标题栏横条），让窗口"立"起来
         windowBackdrop = NSVisualEffectView()
@@ -229,9 +512,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         container.addSubview(hosting)
         container.addSubview(overlayView)
         container.addSubview(lensBorder)
-        // 融按钮不挂在这里：`layoutFuseButton()` 会把它加进红绿灯所在的控件组，
-        // 让四个按钮**同父同组**，由系统统一处理悬停联动（详见 layoutFuseButton 注释）。
-        container.fuseButton = fuseButton
+        // 【A 方案】自绘四按钮组挂在内容视图**最上层**：它是我们自己的子视图，
+        // 不会像挂进红绿灯控件组那样被原生图层盖住；`layoutTrafficCluster()` 负责定位。
+        // （同父同组那条路已被证伪：系统 tracking 区域不为外来按钮扩大。）
+        container.addSubview(trafficCluster)
+        container.trafficCluster = trafficCluster
 
         window.contentView = container
         window.delegate = self
@@ -239,7 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = container!
         Task { @MainActor in Translator.shared.attachHosting(to: c) }
         CaptureEngine.shared.excludeWindowIDs = [CGWindowID(overlayWindow.windowNumber)]
-        startClusterHoverPoller()   // 四键联动：鼠标移到标题栏按钮区时，蓝点与红绿灯一起揭示符号
+        startClusterHoverPoller()   // 组内悬停联动：光标落在四按钮任一上时四个符号一起揭示
 
         // 取字引擎 → 覆盖层（广播到主覆盖层 + 所有融合态分屏覆盖层）
         CaptureEngine.shared.onUpdate = { [weak self] items in
@@ -298,8 +583,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyState(.settings)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        // 标题栏布局完成后再校正一次融按钮位置（首次窗口尚未 on-screen 时读不到红绿灯 frame）
-        DispatchQueue.main.async { [weak self] in self?.layoutFuseButton() }
+        // 标题栏布局完成后再校正一次按钮组位置（首次窗口尚未 on-screen 时读不到红绿灯 frame）
+        DispatchQueue.main.async { [weak self] in self?.layoutTrafficCluster() }
 
         // 首次启动 → 弹出 3 步引导（权限讲解 + 一键跳设置）。
         OnboardingWindowController.shared.showIfNeeded()
@@ -307,11 +592,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - 三态切换
 
-    func applyState(_ state: AppState) {
+    /// - Parameter lensMaximized：进入镜头（画框）态时是否直接铺满整块可用屏幕。
+    ///   仅第三个「+」按钮会传 true（2026-10-27 用户：改为「启用画框翻译并最大化」）；
+    ///   其余入口仍用默认的 620×460 居中框。
+    func applyState(_ state: AppState, lensMaximized: Bool = false) {
         let w = overlayWindow!
         AppModel.shared.state = state
         container.mode = state
-        fuseButton.isHidden = (state == .fusion || state == .region || state == .off)   // 设置态 / 镜头态都显示
+        // 【A 方案】自绘四按钮组（含融按钮）：设置态 / 镜头态可见；融合 / 区域 / 隐藏态整组隐藏。
+        trafficCluster?.isHidden = (state == .fusion || state == .region || state == .off)
         windowBackdrop.isHidden = (state != .settings)                 // 磨砂底只在设置态
         RegionSelectionController.shared.cancel()   // 切换模式时关闭残留选框
         if state != .fusion { teardownFusionWindows() }   // 离开融合态时拆除分屏覆盖窗口
@@ -332,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             centerOnMainScreen(w)
             CaptureEngine.shared.stop()
             w.orderFront(nil)
-            layoutFuseButton()          // 设置态才显示融按钮，此处定位最可靠
+            layoutTrafficCluster()          // 设置态才显示融按钮，此处定位最可靠
 
         case .lens:
             // 镜头态：恢复设计稿第 2 页的「透明镜头框」——可见圆角边框罩住一块区域，
@@ -347,16 +636,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lensBar.isHidden = false
             lensBorder.isHidden = false
             container.layer?.cornerRadius = 12
-            // 镜头框默认尺寸 620×460，居中略偏上（视觉重心更稳）
             let screen = NSScreen.main ?? NSScreen.screens.first!
-            let fw: CGFloat = 620, fh: CGFloat = 460
-            let fx = screen.visibleFrame.midX - fw / 2
-            let fy = screen.visibleFrame.midY - fh / 2 + 30
-            w.setFrame(NSRect(x: fx, y: fy, width: fw, height: fh), display: true)
+            // 默认 620×460 居中略偏上（视觉重心更稳）；最大化时铺满该屏 visibleFrame
+            // （不含菜单栏/ Dock，符合系统「放大」语义）。
+            let frame: NSRect = {
+                if lensMaximized { return screen.visibleFrame }
+                let fw: CGFloat = 620, fh: CGFloat = 460
+                return NSRect(x: screen.visibleFrame.midX - fw / 2,
+                              y: screen.visibleFrame.midY - fh / 2 + 30,
+                              width: fw, height: fh)
+            }()
+            w.setFrame(frame, display: true)
             updateLensChrome()
             overlayView.items = []
             CaptureEngine.shared.start(mode: .lens, region: w.frame)
-            layoutFuseButton()
+            layoutTrafficCluster()
+            // 从 620×460 直接铺满整屏时窗口宽度剧变，setFrame 当帧子视图可能还没拿到新 bounds
+            // （会导致磨砂控制栏 / 白描边停在旧宽度）。下一轮再校一次，幂等无害。
+            DispatchQueue.main.async { [weak self] in
+                self?.container.layoutSubtreeIfNeeded()
+                self?.updateLensChrome()
+            }
             startLensCursorPoller()
 
         case .fusion:
@@ -414,7 +714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let b = container.bounds
         lensBorder.frame = b
         refreshLensCornerGlow()   // 窗口缩放后重算四角弧光路径
-        layoutFuseButton()   // 控制栏磨砂条 + 融按钮随窗口尺寸重新居中对齐红绿灯
+        layoutTrafficCluster()   // 控制栏磨砂条 + 融按钮随窗口尺寸重新居中对齐红绿灯
     }
 
     /// 镜头态四角点亮光：沿镜头框四个圆角各画一段 90° 蓝色弧光 + 沿边短延伸臂。
@@ -568,184 +868,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 隐藏/显示窗口红绿灯按钮（融合态隐藏 chrome）。
+    /// 【A 方案 / 2026-10-27】隐藏/显示标题栏按钮组。
+    /// **原生红绿灯永久隐藏**（出来就可能与自绘组重影），可见性全部由自绘 `TrafficClusterView` 接管。
+    /// 原生按钮的 frame 仍需读取（供自绘组对齐位置与尺寸），隐藏不影响 frame。
     private func setTrafficLights(hidden: Bool) {
         for kind in [NSWindow.ButtonType.closeButton,
                      .miniaturizeButton,
                      .zoomButton] {
-            overlayWindow!.standardWindowButton(kind)?.isHidden = hidden
+            overlayWindow?.standardWindowButton(kind)?.isHidden = true
         }
+        trafficCluster?.isHidden = hidden
     }
 
-    // MARK: - 融按钮
+    /// 自绘四按钮组的位置与排列：完全读取**原生红绿灯的真实 frame** 决定尺寸与间距，
+    /// 不写死坐标（不同 macOS 版本红绿灯尺寸/间距不同；实测各版本约 14pt / 20pt）。
+    /// 第四个（屏幕融合）按钮与前三**同尺寸、同间距**，视觉上真正成为一家人。
+    /// 同时负责镜头态控制栏磨砂条的垂直居中（四个按钮在栏内居中）。
+    private func layoutTrafficCluster() {
+        guard let cluster = trafficCluster,
+              let closeBtn = overlayWindow?.standardWindowButton(.closeButton),
+              let miniBtn  = overlayWindow?.standardWindowButton(.miniaturizeButton),
+              let zoomBtn  = overlayWindow?.standardWindowButton(.zoomButton),
+              let titlebar = zoomBtn.superview else { return }
 
-    /// 融按钮：圆点配色跟随「窗口 key 态 + 悬停」，对齐红绿灯行为（2026-10-12 18:51 用户）。
-    /// 窗口未选中且未悬停 → 失焦灰点（动态跟随深/浅色模式）；悬停或窗口选中 → 蓝色强调色。
-    final class FuseDotButton: NSButton {
-        private var hovered = false { didSet { if hovered != oldValue { updateColor() } } }
-
-        /// 悬停时揭示的「向两端扩展」符号：左右两个实心三角、中间留缝、**无横轴（无尾巴）**，
-        /// 纯白、矢量自绘（锐利清晰），与红绿灯悬停揭示 ×/−/+ 同款风格；平时隐藏，仅显示纯圆点。
-        private let glyphView: ArrowGlyphView = {
-            let v = ArrowGlyphView()
-            v.isHidden = true
-            return v
-        }()
-
-        /// 供「四键联动」轮询调用：只要光标落在标题栏按钮区（关→蓝点），即同步进入悬停态。
-        func setHovered(_ v: Bool) { hovered = v }
-
-        func updateColor() {
-            wantsLayer = true
-            // 圆角必须在这里设：wantsLayer 之前 layer 为 nil，外部提前设会被丢掉（18:54 方形 bug 根因）
-            layer?.cornerRadius = 6    // 12px 圆 → 半径 6，与红绿灯同尺寸
-            layer?.masksToBounds = true
-            let accent = NSColor.controlAccentColor
-            // 失焦红绿灯参考值（2026-10-12 18:58 用户用数码测色计实测，浅色模式）：
-            // 内圆填充 sRGB(193,197,199)、外环 sRGB(165,169,171)——失焦态是「内圆+外环」双层。
-            let fill = NSColor(name: nil) { ap in
-                ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(white: 0.35, alpha: 1)
-                    : NSColor(srgbRed: 193.0/255.0, green: 197.0/255.0, blue: 199.0/255.0, alpha: 1)
-            }
-            let ring = NSColor(name: nil) { ap in
-                ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(white: 0.45, alpha: 1)
-                    : NSColor(srgbRed: 165.0/255.0, green: 169.0/255.0, blue: 171.0/255.0, alpha: 1)
-            }
-            let active = hovered || (window?.isKeyWindow ?? false)
-            if active {
-                layer?.backgroundColor = accent.cgColor
-                layer?.borderWidth = 0          // 点亮态：纯蓝实心，无环
-            } else {
-                layer?.backgroundColor = fill.cgColor
-                layer?.borderWidth = 1          // 失焦态：内圆填充 + 1pt 外环描边
-                layer?.borderColor = ring.cgColor
-            }
-            // 悬停揭示「向两端扩展」符号（无横轴双三角，与红绿灯 ×/−/+ 同款悬停行为）
-            glyphView.isHidden = !hovered
+        // 原生按钮 frame（titlebar 坐标系）→ 窗口坐标 → 容器坐标（`to/from: nil` = 窗口坐标系）
+        func inContainer(_ v: NSView) -> NSRect {
+            let win = titlebar.convert(v.frame, to: nil)
+            return container.convert(win, from: nil)
         }
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if glyphView.superview == nil { addSubview(glyphView) }
-            layoutGlyph()
-            updateColor()
-        }
+        let c = inContainer(closeBtn)
+        let m = inContainer(miniBtn)
+        let z = inContainer(zoomBtn)
 
-        private func layoutGlyph() {
-            guard window != nil else { return }
-            // 2026-10-27：三角放大 + 外移后，旋转 45° 的最大外接半幅 ≈ 5.5pt，
-            // 故绘制框用整个 12×12（不内缩），最远角点距圆心 5.58pt < 半径 6，仍在圆内。
-            glyphView.frame = bounds
-        }
-        override func viewDidChangeEffectiveAppearance() {
-            super.viewDidChangeEffectiveAppearance()
-            updateColor()
-        }
-    }
+        let size = max(c.width, 12)                    // 读真实尺寸（≈14pt），勿硬编码
+        let spacing = max(z.midX - m.midX, 16)         // 红绿灯中心距（≈20pt）
+        let cy = c.midY
 
-    /// 自绘「向两端扩展」符号：**两个等腰直角三角形**，尖端朝左右两侧、中间留缝、无横轴；
-    /// 整体再**逆时针旋转 45°**（2026-10-27 用户选形），使之沿「左下 ↔ 右上」对角线向两端张开。
-    /// 等腰直角校验：直角顶点在尖端，两条直角边水平/竖直各长 w、斜边长 w·√2；
-    /// 故每个三角「深 w、半高 w」。填充色跟 **红绿灯 ×/−/+ 同为深色**（2026-10-27 用户：白色不对）。
-    private final class ArrowGlyphView: NSView {
-        /// 符号填充色：**更深蓝**（2026-10-27 用户选「更深」档）。想调深浅只改这一个常量。
-        static let glyphColor = NSColor(srgbRed: 0.04, green: 0.16, blue: 0.47, alpha: 1)
+        let pad: CGFloat = 5                           // 悬停判定留白
+        let centersX = [c.midX, m.midX, z.midX, z.midX + spacing]
+        let first = centersX[0] - size / 2
+        let last  = centersX[3] + size / 2
+        cluster.frame = NSRect(x: first - pad, y: cy - size / 2 - pad,
+                               width: (last - first) + pad * 2,
+                               height: size + pad * 2)
+        // 组内按钮按**cluster 本地坐标**摆放
+        cluster.layoutButtons(centersX: centersX.map { $0 - cluster.frame.minX },
+                              centerY: size / 2 + pad, size: size)
 
-        /// 固定不翻转 ⇒ 坐标 y 轴向上，ctx.rotate 的正角度即为视觉「逆时针」，方向可预测。
-        override var isFlipped: Bool { false }
-
-        override func draw(_ dirtyRect: NSRect) {
-            super.draw(dirtyRect)
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-            let w: CGFloat = 3.5      // 直角边长（三角大小；2026-10-27：3.0→3.3→3.5 逐轮放大）
-            let gap: CGFloat = 2.2    // 两三角之间的缝（2026-10-27：1.5→2.4 外移后微调）
-            // 尺寸上限校验：最远角点 (w+gap/2, w) 距圆心 √(4.6²+3.5²)=5.78pt < 半径 6pt ✓；
-            // 旋转 45° 后半幅 (4.6+3.5)/√2=5.73pt < 绘制框半宽 6pt ✓。再大会顶到圆边。
-
-            ctx.saveGState()
-            ctx.translateBy(x: bounds.midX, y: bounds.midY)
-            ctx.rotate(by: .pi / 4)   // 逆时针 45°
-            ctx.setFillColor(Self.glyphColor.cgColor)
-
-            // 左三角：直角尖朝 -x（旋转后指向左下）
-            ctx.beginPath()
-            ctx.move(to: CGPoint(x: -(w + gap / 2), y: 0))
-            ctx.addLine(to: CGPoint(x: -gap / 2, y: w))
-            ctx.addLine(to: CGPoint(x: -gap / 2, y: -w))
-            ctx.closePath()
-            ctx.fillPath()
-
-            // 右三角：直角尖朝 +x（旋转后指向右上）
-            ctx.beginPath()
-            ctx.move(to: CGPoint(x: w + gap / 2, y: 0))
-            ctx.addLine(to: CGPoint(x: gap / 2, y: w))
-            ctx.addLine(to: CGPoint(x: gap / 2, y: -w))
-            ctx.closePath()
-            ctx.fillPath()
-
-            ctx.restoreGState()
-        }
-    }
-
-    private func makeFuseButton() -> NSButton {
-        let b = FuseDotButton()
-        b.title = ""                              // 与红绿灯统一：纯圆点，不写字
-        b.isBordered = false
-        b.updateColor()
-        b.frame = NSRect(x: 74, y: 460 - 20, width: 12, height: 12)
-        b.autoresizingMask = [.maxXMargin, .minYMargin] // 钉在左上角，紧挨红绿灯右侧
-        b.toolTip = L10n.s("屏幕融合（⌘⇧F）", "Fusion (⌘⇧F)")
-        b.target = self
-        b.action = #selector(fuseTapped)
-        b.isHidden = true
-        return b
-    }
-
-    /// 控制栏（红绿灯 + 融按钮）+ 镜头态磨砂条统一布局：
-    /// - 融按钮紧挨放大按钮右侧、与红绿灯同垂直中心；
-    /// - 镜头态磨砂条在垂直方向**居中对齐**红绿灯中心（修复「四个按钮不居中」）。
-    /// - 红绿灯 ×/−/+ 覆盖层钉在三个原生按钮正中（蓝点反向带动红绿灯时显示）。
-    /// 全部读取真实窗口按钮位置（不同 macOS 版本红绿灯尺寸/间距不同），不写死坐标。
-    private func layoutFuseButton() {
-        guard let mini = overlayWindow?.standardWindowButton(.miniaturizeButton),
-              let zoom = overlayWindow?.standardWindowButton(.zoomButton),
-              let titlebar = zoom.superview else { return }
-
-        // 红绿灯之间的中心距（标准 ≈ 20pt），融按钮沿用同一距离
-        let spacing = max(zoom.frame.midX - mini.frame.midX, 16)
-
-        // 【四个按钮融为一体】融按钮必须挂进红绿灯**所在的同一个父视图**（`titlebar`，
-        // macOS 的红绿灯控件组），而不是浮在内容视图上做"贴相邻"。
-        // 成为同一个控件组的子视图后，系统把它当同一组按钮统一处理：
-        // 悬停组内任一按钮，整组的悬停揭示一起联动（原生红绿灯 ×/−/+ 由系统绘制，
-        // 我们绝不在其上再画任何东西——那会重影、错位、且必随系统版本崩溃）。
-        if fuseButton.superview !== titlebar { titlebar.addSubview(fuseButton) }
-
-        // 融按钮：放大按钮中心向右 spacing，与红绿灯同垂直中心；
-        // fuseButton 与 close/mini/zoom 同为 titlebar 子视图，故直接用 titlebar 坐标系。
-        let s = fuseButton.frame.width
-        let fbPoint = NSPoint(x: zoom.frame.midX + spacing, y: zoom.frame.midY)
-        fuseButton.frame = NSRect(x: fbPoint.x - s / 2, y: fbPoint.y - s / 2, width: s, height: s)
-
-        // 控制栏磨砂条：垂直居中于红绿灯中心（四个按钮即在栏内垂直居中）；
+        // 控制栏磨砂条：垂直居中于按钮中心（四按钮即在栏内垂直居中）；
         // 水平方向铺满窗口全宽（2026-10-12 18:38 用户：两端补全，不再左右各留 6pt）。
-        // 磨砂条仍在内容视图内，故需把 titlebar 坐标换算到 container 坐标。
-        let fbWindow = titlebar.convert(fbPoint, to: nil)
-        let fb = container.convert(fbWindow, from: nil)
         let barH = ClickThroughContainer.lensBarHeight
-        lensBar.frame = NSRect(x: 0, y: fb.y - barH / 2,
+        lensBar.frame = NSRect(x: 0, y: cy - barH / 2,
                                width: container.bounds.width, height: barH)
     }
 
-    /// 融按钮配色跟随窗口选中状态（2026-10-12 18:47 用户）：key 通知到来时刷新。
-    /// 具体配色（含悬停点亮、深/浅色失焦灰）由 FuseDotButton.updateColor() 统一负责。
-    private func updateFuseAppearance() {
-        (fuseButton as? FuseDotButton)?.updateColor()
-    }
+    /// 窗口 key 态变化时刷新整组配色（2026-10-12 18:47 用户：跟随窗口选中状态）。
+    private func refreshClusterColors() { trafficCluster?.refreshColors() }
 
+    /// 屏幕融合（原来叫 fuseTapped；自绘组的按钮是跨类 target-action，
+    /// private 不可达，故改为 internal）。
+    func enterFusion() { applyState(.fusion) }
 
-    @objc private func fuseTapped() { applyState(.fusion) }
+    /// 画框最大化（第三个「+」按钮，2026-10-27 用户定）：启用画框翻译 + 镜头框铺满整屏。
+    /// 不再走 AppKit 的 performZoom —— 那样只是系统放大，不会启动画框翻译，两条合成这一步。
+    func enterLensMaximized() { applyState(.lens, lensMaximized: true) }
 
     // MARK: - 镜头态鼠标穿透轮询
 
@@ -801,12 +987,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.ignoresMouseEvents = !(inBar || nearEdge)
     }
 
-    // MARK: - 四键联动（标题栏按钮区悬停）
+    // MARK: - 组内悬停联动（自绘四按钮组）
 
-    /// 红绿灯（关/缩/放）是 macOS 原生标题栏按钮，鼠标移到按钮区时三者一起揭示 ×/−/+；
-    /// 融按钮（蓝点）是自建 NSButton，原本只在自己 12px 圆点上响应，故「孤零零」。
-    /// 此轮询读取光标屏幕坐标，落在「关闭按钮 → 融按钮」整段按钮区时让融按钮同步进悬停态，
-    /// 实现四个按钮一起揭示符号的联动效果。
+    /// 四个按钮现在**全部由我们自绘**，所以联动是纯内部逻辑：轮询读光标屏幕坐标，
+    /// 落在整组按钮区（含留白）时由 `TrafficClusterView` 向四个按钮**广播** hover，
+    /// 于是 × / − / + / 双三角一起揭示、一起消失 —— 双向、可靠、不依赖任何系统私有行为。
+    ///
+    /// 之所以用轮询而非 tracking area：镜头态整窗 `ignoresMouseEvents=true`（请鼠标穿透），
+    /// 鼠标事件根本送不到我们视图；轮询看的是坐标，不受事件投递影响，各态行为一致。
     private var clusterHoverPoller: Timer?
 
     private func startClusterHoverPoller() {
@@ -824,63 +1012,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateClusterHover() {
-        guard let fuse = fuseButton as? FuseDotButton else { return }
-        guard let close = overlayWindow?.standardWindowButton(.closeButton),
-              let zoom = overlayWindow?.standardWindowButton(.zoomButton),
-              let win = overlayWindow else { return }
-        // 注意：`convert(_:to: nil)` 得到的是**窗口坐标**（原点在窗口左下角），
-        // 而 NSEvent.mouseLocation 是**屏幕坐标**（原点在主屏左下角）。
-        // 两者差一个窗口原点偏移——上一版漏加 win.frame.origin，导致窗口不在屏幕原点时
-        // rect.contains(mouse) 永远 false，蓝点既不显示符号也不联动。这里补上偏移转成屏幕坐标。
+        guard let cluster = trafficCluster, !cluster.isHidden,
+              let sup = cluster.superview, let win = overlayWindow else { return }
+        // `convert(_:to: nil)` 得到的是**窗口坐标**（原点在窗口左下角），
+        // 而 NSEvent.mouseLocation 是**屏幕坐标** —— 必须补上窗口原点偏移。
+        // （上一版漏加该偏移，导致窗口不在屏幕原点时 contains 永远 false，悬停完全不触发。）
+        let r = sup.convert(cluster.frame, to: nil)
         let o = win.frame.origin
-        let mouse = NSEvent.mouseLocation
-        func screenRect(of v: NSView) -> NSRect {
-            let r = v.convert(v.bounds, to: nil)
-            return NSRect(x: o.x + r.origin.x, y: o.y + r.origin.y, width: r.width, height: r.height)
-        }
-        let closeS = screenRect(of: close)
-        let zoomS  = screenRect(of: zoom)
-        let fuseS  = screenRect(of: fuse)
-        let minX = min(closeS.minX, fuseS.minX)
-        let maxX = max(zoomS.maxX, fuseS.maxX)
-        let minY = min(closeS.minY, fuseS.minY)
-        let maxY = max(closeS.maxY, fuseS.maxY)
-        let rect = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-        let inCluster = rect.contains(mouse)
-        // 蓝点仅在设置态可见；其悬停态 = 光标落在整段按钮区（关 → 蓝点）。
-        let fuseHot = inCluster && !fuse.isHidden
-        fuse.setHovered(fuseHot)
-
-        // 「蓝点反向带动红绿灯」：仅当光标落在**蓝点本身**时补发 hover 事件。
-        // 落在原生红绿灯上时 macOS 自己已在处理，我们不管，避免状态互相打架。
-        forwardTrafficLightHover(fuseS.contains(mouse) && !fuse.isHidden)
+        let screen = NSRect(x: o.x + r.origin.x, y: o.y + r.origin.y,
+                            width: r.width, height: r.height)
+        cluster.setHovered(screen.contains(NSEvent.mouseLocation))
     }
 
-    /// 上一次转发给原生红绿灯的 hover 状态（避免每 0.05s 重复派发）。
-    private var tlHoverForwarded = false
-
-    /// 把 mouseEntered / mouseExited **转发**给三个原生标题栏按钮，由 **macOS 自己**去揭示
-    /// × / − / + —— 我们在它们上面**不绘制任何东西**（2026-10-27 用户铁律）。
-    /// 背景：macOS 红绿灯的 hover tracking 区域只覆盖原生那三个按钮，不会因为我们往同一父视图
-    /// 里加了第四个按钮而扩大；所以「悬停蓝点时三者不显符号」只能靠补发事件驱动原生机制解决。
-    private func forwardTrafficLightHover(_ entering: Bool) {
-        guard tlHoverForwarded != entering else { return }
-        tlHoverForwarded = entering
-        guard let win = overlayWindow else { return }
-        // 事件坐标必须是**窗口坐标系**（NSEvent.mouseLocation 是屏幕坐标系）
-        let loc = win.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
-        let type: NSEvent.EventType = entering ? .mouseEntered : .mouseExited
-        guard let ev = NSEvent.enterExitEvent(with: type, location: loc, modifierFlags: [],
-                                              timestamp: ProcessInfo.processInfo.systemUptime,
-                                              windowNumber: win.windowNumber, context: nil,
-                                              eventNumber: 0, trackingNumber: 0,
-                                              userData: nil) else { return }
-        for b in [win.standardWindowButton(.closeButton),
-                  win.standardWindowButton(.miniaturizeButton),
-                  win.standardWindowButton(.zoomButton)] {
-            entering ? b?.mouseEntered(with: ev) : b?.mouseExited(with: ev)
-        }
-    }
 
     // MARK: - Control 悬停翻译
 
@@ -1597,19 +1740,19 @@ extension AppDelegate: NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
-        layoutFuseButton()      // 窗口缩放后重新与红绿灯对齐
+        layoutTrafficCluster()      // 窗口缩放后重新与红绿灯对齐
         if AppModel.shared.state == .lens {
             updateLensChrome()  // 控制栏细条 / 框描边跟随窗口
         }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        layoutFuseButton()
-        updateFuseAppearance()
+        layoutTrafficCluster()
+        refreshClusterColors()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        updateFuseAppearance()
+        refreshClusterColors()
     }
 }
 
