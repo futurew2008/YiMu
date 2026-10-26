@@ -487,8 +487,11 @@ final class CaptureEngine {
             self.latestOCR = items
             DispatchQueue.main.async { self.combineAndPush() }
         }
+        // 镜头/区域态是交互式取字，用 6fps 让译文更快跟上拖动；融合态只整屏兜底，3fps 省 CPU。
+        let ocrFps = (mode == .lens || mode == .region) ? 6 : 3
         OCRTextExtractor.shared.start(displays: displays,
                                      cropRect: nil,
+                                     frameRate: ocrFps,
                                      excludeWindowIDs: excludeWindowIDs)
     }
 

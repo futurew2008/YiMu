@@ -135,9 +135,12 @@ final class OCRTextExtractor: NSObject {
     /// - Parameters:
     ///   - displays: 形如 (frame 全局矩形, id, scale)。融合/镜头态传全部屏幕；区域态传单屏。
     ///   - cropRect: 兼容旧接口（现由 CaptureEngine 统一裁剪，不再在抽取器内裁）。
+    ///   - frameRate: 抓屏帧率（帧/秒）。镜头/区域态用更高帧率让译文更快跟上拖动；
+    ///     融合态只需整屏兜底，保持低帧率省 CPU。
     ///   - excludeWindowIDs: 从抓屏中排除的本 app 窗口，避免译文块被二次识别造成反馈堆积。
     func start(displays: [(frame: NSRect, id: CGDirectDisplayID, scale: CGFloat)],
               cropRect: NSRect?,
+              frameRate: Int = 3,
               excludeWindowIDs: [CGWindowID] = []) {
         guard hasPermission else { return }
         stateQueue.sync {
@@ -145,7 +148,7 @@ final class OCRTextExtractor: NSObject {
             resultsByDisplay.removeAll()
         }
         for d in displays {
-            Task { await begin(display: d, excludeWindowIDs: excludeWindowIDs) }
+            Task { await begin(display: d, frameRate: frameRate, excludeWindowIDs: excludeWindowIDs) }
         }
     }
 
@@ -169,6 +172,7 @@ final class OCRTextExtractor: NSObject {
     // MARK: - 启动流（每块显示一路）
 
     private func begin(display: (frame: NSRect, id: CGDirectDisplayID, scale: CGFloat),
+                       frameRate: Int = 3,
                        excludeWindowIDs: [CGWindowID]) async {
         guard let content = try? await SCShareableContent.current,
               let disp = content.displays.first(where: { $0.displayID == display.id }) else { return }
@@ -180,7 +184,7 @@ final class OCRTextExtractor: NSObject {
         let cfg = SCStreamConfiguration()
         cfg.width = Int(CGFloat(disp.width) * display.scale)
         cfg.height = Int(CGFloat(disp.height) * display.scale)
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 3) // ~3fps（2026-10-12 加强镜头）：新文字最快~0.3s 被认出，灵敏度显著提升；CPU 代价可控（仅镜头/区域态跑）
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, frameRate))) // 镜头/区域态用更高帧率（默认 6），新文字更快被认出，拖动后译文跟手；融合态用 3 省 CPU
         cfg.showsCursor = false
         cfg.captureResolution = .best
 

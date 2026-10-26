@@ -224,35 +224,43 @@ struct SettingsView: View {
             }
 
             GroupBox {
-                // 2026-10-14：源/目标语言合并为一行（用户要求）。
-                // 2026-10-15：标签不占固定宽（贴紧下拉）、下拉缩到 120（用户截图反馈：红线距离近一点、绿线再缩短）。
-                HStack(spacing: 6) {
-                    Text(L10n.s("源语言", "Source"))
-                    Picker("", selection: $model.sourceLanguageCode) {
-                        Text(L10n.s("自动识别", "Auto detect")).tag(nil as String?)
-                        ForEach(LanguageOption.targetOptions) { opt in
-                            Text(opt.displayName).tag(opt.id as String?)
+                // 2026-10-26：恢复为上下两行（源语言一行、目标语言一行）；
+                // 标签不占固定宽（贴紧下拉）、下拉缩到 120 保持不变。
+                VStack(alignment: .leading, spacing: 10) {
+                    // 2026-10-26：两个标签固定等宽（保证两行下拉左缘对齐），
+                    // 标签→下拉间距加大，下拉整体右移但仍保持两行一致间距。
+                    HStack(spacing: 14) {
+                        Text(L10n.s("源语言", "Source"))
+                            .frame(width: 56, alignment: .leading)
+                        Picker("", selection: $model.sourceLanguageCode) {
+                            Text(L10n.s("自动识别", "Auto detect")).tag(nil as String?)
+                            ForEach(LanguageOption.targetOptions) { opt in
+                                Text(opt.displayName).tag(opt.id as String?)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 120)
+                        Spacer()
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 120)
-                    Text(L10n.s("目标语言", "Target"))
-                    Picker("", selection: $model.targetLanguageCode) {
-                        ForEach(LanguageOption.targetOptions) { opt in
-                            Text(opt.displayName).tag(opt.id)
+                    HStack(spacing: 14) {
+                        Text(L10n.s("目标语言", "Target"))
+                            .frame(width: 56, alignment: .leading)
+                        Picker("", selection: $model.targetLanguageCode) {
+                            ForEach(LanguageOption.targetOptions) { opt in
+                                Text(opt.displayName).tag(opt.id)
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 120)
+                        Spacer()
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 120)
-                    Spacer()
                 }
                 .padding(10)
             }
 
             permissionSection
-            backendSection
             engineSection
 
             HStack(spacing: 10) {
@@ -320,12 +328,10 @@ struct SettingsView: View {
                     infoRow(L10n.s("版本", "Version"), versionString)
                     Divider()
                     infoRow(L10n.s("引擎", "Engine"),
-                            prefs.translationBackend.displayName)
+                            L10n.s("Apple 设备端", "Apple on-device"))
                     Divider()
                     infoRow(L10n.s("隐私", "Privacy"),
-                            prefs.translationBackend.sendsDataOffDevice
-                                ? L10n.s("翻译经第三方服务器", "Translations go to a 3rd-party server")
-                                : L10n.s("全本地处理，无任何上传", "Fully on-device, zero upload"))
+                            L10n.s("全本地处理，无任何上传", "Fully on-device, zero upload"))
                 }
                 .padding(10)
             }
@@ -419,6 +425,7 @@ struct SettingsView: View {
                     Spacer()
                 }
                 if testResult == "Hello" {
+                    // 原文被原样返回 = 翻译失败回退：多为目标语言包未下载。
                     Text(L10n.s("译文等于原文，可能目标语言包未下载，请在系统「设置 ▸ 通用 ▸ 语言与地区 / 翻译」中下载目标语言离线包",
                                 "Translation equals source — the offline language pack may not be downloaded yet. Get it in System Settings ▸ General ▸ Language & Region / Translate."))
                         .font(.system(size: 10))
@@ -426,76 +433,6 @@ struct SettingsView: View {
                 }
             }
             .padding(10)
-        }
-    }
-
-    // MARK: - 翻译引擎选择（2026-10-14 新增：可选云端引擎）
-
-    /// 「翻译引擎」分区：默认 Apple 设备端（零外发）；选云端引擎时展开 API key 录入与外发警告。
-    /// API key 直接读写本机 Keychain，绝不落明文文件。
-    @ViewBuilder
-    private var backendSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(L10n.s("翻译引擎", "Translation engine"))
-                    .font(.system(size: 12, weight: .medium))
-
-                Picker("", selection: Binding(
-                    get: { prefs.translationBackend },
-                    set: { prefs.translationBackend = $0 }
-                )) {
-                    ForEach(TranslationBackend.allCases) { b in
-                        Text(b.displayName).tag(b)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(width: 300, alignment: .leading)
-
-                if prefs.translationBackend.sendsDataOffDevice {
-                    Text(L10n.s("⚠️ 此模式下，屏幕上的原文会发送到 \(prefs.translationBackend.displayName) 的服务器。仅在你主动选择时生效，可随时切回 Apple 设备端。",
-                                "⚠️ In this mode, on-screen text is sent to \(prefs.translationBackend.displayName)'s servers. Active only when you choose it; switch back to Apple anytime."))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    SecureField(L10n.s("API Key", "API Key"),
-                                text: Binding(
-                                    get: { KeychainHelper.get(prefs.translationBackend.keychainService) ?? "" },
-                                    set: { KeychainHelper.set($0, forService: prefs.translationBackend.keychainService) }
-                                ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 320)
-
-                    if prefs.translationBackend == .microsoft {
-                        TextField(L10n.s("区域（如 eastasia）", "Region (e.g. eastasia)"),
-                                  text: Binding(
-                                    get: { prefs.microsoftRegion },
-                                    set: { prefs.microsoftRegion = $0 }
-                                  ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 320)
-                    }
-
-                    if prefs.translationBackend == .deepl {
-                        Toggle(L10n.s("使用 DeepL Pro 端点", "Use DeepL Pro endpoint"),
-                               isOn: Binding(
-                                get: { prefs.deeplPro },
-                                set: { prefs.deeplPro = $0 }
-                               ))
-                        .font(.system(size: 11))
-                    }
-
-                    Text(L10n.s("密钥仅保存在本机钥匙串，不写入文件、不上传。",
-                                "The key is stored only in this Mac's Keychain — never written to files or uploaded."))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(10)
-            // 2026-10-14：内容撑满宽度，GroupBox 右缘延伸到与其它分区对齐（否则收缩成窄条）。
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

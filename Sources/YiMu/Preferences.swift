@@ -61,27 +61,6 @@ final class Preferences: ObservableObject {
         }
     }
 
-    // MARK: - 翻译引擎（2026-10-14 新增：可选云端引擎，默认 Apple 设备端）
-
-    /// 当前翻译后端。默认 `.apple`（设备端、零外发）。
-    /// 用 `@Published` 的 `backendRaw` 做后备，保证设置页切换时 SwiftUI 即时刷新。
-    @Published private var backendRaw: String =
-        UserDefaults.standard.string(forKey: Key.backend) ?? TranslationBackend.apple.rawValue
-    var translationBackend: TranslationBackend {
-        get { TranslationBackend(rawValue: backendRaw) ?? .apple }
-        set { backendRaw = newValue.rawValue }
-    }
-
-    /// Microsoft Translator（Azure）区域，如 "eastasia"。
-    @Published var microsoftRegion: String {
-        didSet { persist(microsoftRegion, key: Key.microsoftRegion) }
-    }
-
-    /// 是否使用 DeepL Pro 端点（默认免费端点 api-free.deepl.com）。
-    @Published var deeplPro: Bool {
-        didSet { UserDefaults.standard.set(deeplPro, forKey: Key.deeplPro) }
-    }
-
     // MARK: - 便捷计算
 
     var isEnglish: Bool { uiLanguage == "en" }
@@ -118,8 +97,6 @@ final class Preferences: ObservableObject {
         } else {
             self.hotkeys = Hotkey.defaults
         }
-        self.microsoftRegion = d.string(forKey: Key.microsoftRegion) ?? ""
-        self.deeplPro = d.bool(forKey: Key.deeplPro)
     }
 
     /// 恢复默认快捷键。
@@ -147,9 +124,6 @@ final class Preferences: ObservableObject {
         static let hotkeys    = "yi.hotkeys"
         static let sourceLanguage = "yi.sourceLanguage"
         static let targetLanguage = "yi.targetLanguage"
-        static let backend         = "yi.translationBackend"
-        static let microsoftRegion = "yi.microsoftRegion"
-        static let deeplPro        = "yi.deeplPro"
     }
 }
 

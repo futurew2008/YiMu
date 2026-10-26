@@ -25,14 +25,21 @@ final class ClickThroughContainer: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         if mode == .settings { return super.hitTest(point) }
 
-        // 融合按钮：所有非设置态都可点（镜头态显示，融合 / 区域态隐藏）
-        if let fb = fuseButton, !fb.isHidden, fb.frame.contains(point) { return fb }
+        let pWin = convert(point, to: nil)
+
+        // 融合按钮：所有非设置态都可点（镜头态显示，融合 / 区域态隐藏）。
+        // 注意：融按钮已挂进红绿灯所在的控件组，其 frame 属**该父视图**坐标系，
+        // 而这里的 point 是容器坐标系 —— 两者空间不同，必须统一换算到窗口坐标再比较，
+        // 否则这里会拿错误的矩形做判定（直接 `fb.frame.contains(point)` 是错的）。
+        if let fb = fuseButton, !fb.isHidden, let sup = fb.superview {
+            let fbWin = sup.convert(fb.frame, to: nil)
+            if fbWin.contains(pWin) { return fb }
+        }
 
         guard mode == .lens else { return nil }   // 融合 / 区域：全透
 
         // 镜头态：主窗口是「透明镜头框」。框内完全穿透；顶部 30pt 控制栏可拖动、红绿灯可点；
         // 边缘 5pt 交给窗口系统（可拖拽缩放框大小）。
-        let pWin = convert(point, to: nil)
         let b = bounds
         let edge: CGFloat = 5
         let nearEdge = pWin.x < edge || pWin.x > b.width - edge
@@ -222,7 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         container.addSubview(hosting)
         container.addSubview(overlayView)
         container.addSubview(lensBorder)
-        container.addSubview(fuseButton)
+        // 融按钮不挂在这里：`layoutFuseButton()` 会把它加进红绿灯所在的控件组，
+        // 让四个按钮**同父同组**，由系统统一处理悬停联动（详见 layoutFuseButton 注释）。
         container.fuseButton = fuseButton
 
         window.contentView = container
@@ -231,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = container!
         Task { @MainActor in Translator.shared.attachHosting(to: c) }
         CaptureEngine.shared.excludeWindowIDs = [CGWindowID(overlayWindow.windowNumber)]
+        startClusterHoverPoller()   // 四键联动：鼠标移到标题栏按钮区时，蓝点与红绿灯一起揭示符号
 
         // 取字引擎 → 覆盖层（广播到主覆盖层 + 所有融合态分屏覆盖层）
         CaptureEngine.shared.onUpdate = { [weak self] items in
@@ -575,16 +584,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     final class FuseDotButton: NSButton {
         private var hovered = false { didSet { if hovered != oldValue { updateColor() } } }
 
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            for ta in trackingAreas where ta.owner === self { removeTrackingArea(ta) }
-            // activeAlways：窗口未选中（非 key）时悬停依然生效，与红绿灯悬停一致
-            addTrackingArea(NSTrackingArea(rect: bounds,
-                                           options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                           owner: self, userInfo: nil))
-        }
-        override func mouseEntered(with event: NSEvent) { hovered = true }
-        override func mouseExited(with event: NSEvent)  { hovered = false }
+        /// 悬停时揭示的「向两端扩展」符号：左右两个实心三角、中间留缝、**无横轴（无尾巴）**，
+        /// 纯白、矢量自绘（锐利清晰），与红绿灯悬停揭示 ×/−/+ 同款风格；平时隐藏，仅显示纯圆点。
+        private let glyphView: ArrowGlyphView = {
+            let v = ArrowGlyphView()
+            v.isHidden = true
+            return v
+        }()
+
+        /// 供「四键联动」轮询调用：只要光标落在标题栏按钮区（关→蓝点），即同步进入悬停态。
+        func setHovered(_ v: Bool) { hovered = v }
 
         func updateColor() {
             wantsLayer = true
@@ -613,14 +622,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 layer?.borderWidth = 1          // 失焦态：内圆填充 + 1pt 外环描边
                 layer?.borderColor = ring.cgColor
             }
+            // 悬停揭示「向两端扩展」符号（无横轴双三角，与红绿灯 ×/−/+ 同款悬停行为）
+            glyphView.isHidden = !hovered
         }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if glyphView.superview == nil { addSubview(glyphView) }
+            layoutGlyph()
             updateColor()
+        }
+
+        private func layoutGlyph() {
+            guard window != nil else { return }
+            // 2026-10-27：三角放大 + 外移后，旋转 45° 的最大外接半幅 ≈ 5.5pt，
+            // 故绘制框用整个 12×12（不内缩），最远角点距圆心 5.58pt < 半径 6，仍在圆内。
+            glyphView.frame = bounds
         }
         override func viewDidChangeEffectiveAppearance() {
             super.viewDidChangeEffectiveAppearance()
             updateColor()
+        }
+    }
+
+    /// 自绘「向两端扩展」符号：**两个等腰直角三角形**，尖端朝左右两侧、中间留缝、无横轴；
+    /// 整体再**逆时针旋转 45°**（2026-10-27 用户选形），使之沿「左下 ↔ 右上」对角线向两端张开。
+    /// 等腰直角校验：直角顶点在尖端，两条直角边水平/竖直各长 w、斜边长 w·√2；
+    /// 故每个三角「深 w、半高 w」。填充色跟 **红绿灯 ×/−/+ 同为深色**（2026-10-27 用户：白色不对）。
+    private final class ArrowGlyphView: NSView {
+        /// 符号填充色：**更深蓝**（2026-10-27 用户选「更深」档）。想调深浅只改这一个常量。
+        static let glyphColor = NSColor(srgbRed: 0.04, green: 0.16, blue: 0.47, alpha: 1)
+
+        /// 固定不翻转 ⇒ 坐标 y 轴向上，ctx.rotate 的正角度即为视觉「逆时针」，方向可预测。
+        override var isFlipped: Bool { false }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+            let w: CGFloat = 3.5      // 直角边长（三角大小；2026-10-27：3.0→3.3→3.5 逐轮放大）
+            let gap: CGFloat = 2.2    // 两三角之间的缝（2026-10-27：1.5→2.4 外移后微调）
+            // 尺寸上限校验：最远角点 (w+gap/2, w) 距圆心 √(4.6²+3.5²)=5.78pt < 半径 6pt ✓；
+            // 旋转 45° 后半幅 (4.6+3.5)/√2=5.73pt < 绘制框半宽 6pt ✓。再大会顶到圆边。
+
+            ctx.saveGState()
+            ctx.translateBy(x: bounds.midX, y: bounds.midY)
+            ctx.rotate(by: .pi / 4)   // 逆时针 45°
+            ctx.setFillColor(Self.glyphColor.cgColor)
+
+            // 左三角：直角尖朝 -x（旋转后指向左下）
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: -(w + gap / 2), y: 0))
+            ctx.addLine(to: CGPoint(x: -gap / 2, y: w))
+            ctx.addLine(to: CGPoint(x: -gap / 2, y: -w))
+            ctx.closePath()
+            ctx.fillPath()
+
+            // 右三角：直角尖朝 +x（旋转后指向右上）
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: w + gap / 2, y: 0))
+            ctx.addLine(to: CGPoint(x: gap / 2, y: w))
+            ctx.addLine(to: CGPoint(x: gap / 2, y: -w))
+            ctx.closePath()
+            ctx.fillPath()
+
+            ctx.restoreGState()
         }
     }
 
@@ -641,24 +705,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 控制栏（红绿灯 + 融按钮）+ 镜头态磨砂条统一布局：
     /// - 融按钮紧挨放大按钮右侧、与红绿灯同垂直中心；
     /// - 镜头态磨砂条在垂直方向**居中对齐**红绿灯中心（修复「四个按钮不居中」）。
+    /// - 红绿灯 ×/−/+ 覆盖层钉在三个原生按钮正中（蓝点反向带动红绿灯时显示）。
     /// 全部读取真实窗口按钮位置（不同 macOS 版本红绿灯尺寸/间距不同），不写死坐标。
     private func layoutFuseButton() {
-        guard let zoom = overlayWindow?.standardWindowButton(.zoomButton),
-              let mini = overlayWindow?.standardWindowButton(.miniaturizeButton),
+        guard let mini = overlayWindow?.standardWindowButton(.miniaturizeButton),
+              let zoom = overlayWindow?.standardWindowButton(.zoomButton),
               let titlebar = zoom.superview else { return }
 
         // 红绿灯之间的中心距（标准 ≈ 20pt），融按钮沿用同一距离
         let spacing = max(zoom.frame.midX - mini.frame.midX, 16)
 
-        // 融按钮：放大按钮中心向右 spacing，与红绿灯同中心
-        let fbPoint = NSPoint(x: zoom.frame.midX + spacing, y: zoom.frame.midY)
-        let fbWindow = titlebar.convert(fbPoint, to: nil)
-        let fb = container.convert(fbWindow, from: nil)
+        // 【四个按钮融为一体】融按钮必须挂进红绿灯**所在的同一个父视图**（`titlebar`，
+        // macOS 的红绿灯控件组），而不是浮在内容视图上做"贴相邻"。
+        // 成为同一个控件组的子视图后，系统把它当同一组按钮统一处理：
+        // 悬停组内任一按钮，整组的悬停揭示一起联动（原生红绿灯 ×/−/+ 由系统绘制，
+        // 我们绝不在其上再画任何东西——那会重影、错位、且必随系统版本崩溃）。
+        if fuseButton.superview !== titlebar { titlebar.addSubview(fuseButton) }
+
+        // 融按钮：放大按钮中心向右 spacing，与红绿灯同垂直中心；
+        // fuseButton 与 close/mini/zoom 同为 titlebar 子视图，故直接用 titlebar 坐标系。
         let s = fuseButton.frame.width
-        fuseButton.frame = NSRect(x: fb.x - s / 2, y: fb.y - s / 2, width: s, height: s)
+        let fbPoint = NSPoint(x: zoom.frame.midX + spacing, y: zoom.frame.midY)
+        fuseButton.frame = NSRect(x: fbPoint.x - s / 2, y: fbPoint.y - s / 2, width: s, height: s)
 
         // 控制栏磨砂条：垂直居中于红绿灯中心（四个按钮即在栏内垂直居中）；
         // 水平方向铺满窗口全宽（2026-10-12 18:38 用户：两端补全，不再左右各留 6pt）。
+        // 磨砂条仍在内容视图内，故需把 titlebar 坐标换算到 container 坐标。
+        let fbWindow = titlebar.convert(fbPoint, to: nil)
+        let fb = container.convert(fbWindow, from: nil)
         let barH = ClickThroughContainer.lensBarHeight
         lensBar.frame = NSRect(x: 0, y: fb.y - barH / 2,
                                width: container.bounds.width, height: barH)
@@ -669,6 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateFuseAppearance() {
         (fuseButton as? FuseDotButton)?.updateColor()
     }
+
 
     @objc private func fuseTapped() { applyState(.fusion) }
 
@@ -724,6 +799,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let nearEdge = fromTop <= 6 || fromBottom <= 6 || fromLeft <= 6 || fromRight <= 6
         w.ignoresMouseEvents = !(inBar || nearEdge)
+    }
+
+    // MARK: - 四键联动（标题栏按钮区悬停）
+
+    /// 红绿灯（关/缩/放）是 macOS 原生标题栏按钮，鼠标移到按钮区时三者一起揭示 ×/−/+；
+    /// 融按钮（蓝点）是自建 NSButton，原本只在自己 12px 圆点上响应，故「孤零零」。
+    /// 此轮询读取光标屏幕坐标，落在「关闭按钮 → 融按钮」整段按钮区时让融按钮同步进悬停态，
+    /// 实现四个按钮一起揭示符号的联动效果。
+    private var clusterHoverPoller: Timer?
+
+    private func startClusterHoverPoller() {
+        guard clusterHoverPoller == nil else { return }
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.updateClusterHover()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        clusterHoverPoller = t
+    }
+
+    private func stopClusterHoverPoller() {
+        clusterHoverPoller?.invalidate()
+        clusterHoverPoller = nil
+    }
+
+    private func updateClusterHover() {
+        guard let fuse = fuseButton as? FuseDotButton else { return }
+        guard let close = overlayWindow?.standardWindowButton(.closeButton),
+              let zoom = overlayWindow?.standardWindowButton(.zoomButton),
+              let win = overlayWindow else { return }
+        // 注意：`convert(_:to: nil)` 得到的是**窗口坐标**（原点在窗口左下角），
+        // 而 NSEvent.mouseLocation 是**屏幕坐标**（原点在主屏左下角）。
+        // 两者差一个窗口原点偏移——上一版漏加 win.frame.origin，导致窗口不在屏幕原点时
+        // rect.contains(mouse) 永远 false，蓝点既不显示符号也不联动。这里补上偏移转成屏幕坐标。
+        let o = win.frame.origin
+        let mouse = NSEvent.mouseLocation
+        func screenRect(of v: NSView) -> NSRect {
+            let r = v.convert(v.bounds, to: nil)
+            return NSRect(x: o.x + r.origin.x, y: o.y + r.origin.y, width: r.width, height: r.height)
+        }
+        let closeS = screenRect(of: close)
+        let zoomS  = screenRect(of: zoom)
+        let fuseS  = screenRect(of: fuse)
+        let minX = min(closeS.minX, fuseS.minX)
+        let maxX = max(zoomS.maxX, fuseS.maxX)
+        let minY = min(closeS.minY, fuseS.minY)
+        let maxY = max(closeS.maxY, fuseS.maxY)
+        let rect = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        let inCluster = rect.contains(mouse)
+        // 蓝点仅在设置态可见；其悬停态 = 光标落在整段按钮区（关 → 蓝点）。
+        let fuseHot = inCluster && !fuse.isHidden
+        fuse.setHovered(fuseHot)
+
+        // 「蓝点反向带动红绿灯」：仅当光标落在**蓝点本身**时补发 hover 事件。
+        // 落在原生红绿灯上时 macOS 自己已在处理，我们不管，避免状态互相打架。
+        forwardTrafficLightHover(fuseS.contains(mouse) && !fuse.isHidden)
+    }
+
+    /// 上一次转发给原生红绿灯的 hover 状态（避免每 0.05s 重复派发）。
+    private var tlHoverForwarded = false
+
+    /// 把 mouseEntered / mouseExited **转发**给三个原生标题栏按钮，由 **macOS 自己**去揭示
+    /// × / − / + —— 我们在它们上面**不绘制任何东西**（2026-10-27 用户铁律）。
+    /// 背景：macOS 红绿灯的 hover tracking 区域只覆盖原生那三个按钮，不会因为我们往同一父视图
+    /// 里加了第四个按钮而扩大；所以「悬停蓝点时三者不显符号」只能靠补发事件驱动原生机制解决。
+    private func forwardTrafficLightHover(_ entering: Bool) {
+        guard tlHoverForwarded != entering else { return }
+        tlHoverForwarded = entering
+        guard let win = overlayWindow else { return }
+        // 事件坐标必须是**窗口坐标系**（NSEvent.mouseLocation 是屏幕坐标系）
+        let loc = win.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+        let type: NSEvent.EventType = entering ? .mouseEntered : .mouseExited
+        guard let ev = NSEvent.enterExitEvent(with: type, location: loc, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: win.windowNumber, context: nil,
+                                              eventNumber: 0, trackingNumber: 0,
+                                              userData: nil) else { return }
+        for b in [win.standardWindowButton(.closeButton),
+                  win.standardWindowButton(.miniaturizeButton),
+                  win.standardWindowButton(.zoomButton)] {
+            entering ? b?.mouseEntered(with: ev) : b?.mouseExited(with: ev)
+        }
     }
 
     // MARK: - Control 悬停翻译
@@ -1339,11 +1495,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 菜单栏按钮在「数据会外发」的引擎下显示 ☁，否则清空。
-    /// 这是对你隐私红线的兜底：无论何时，一眼知道此刻翻译是否走云端。
+    /// 菜单栏按钮标题：译幕仅用 Apple 设备端引擎（零外发），无需外发标识。
     private func refreshStatusBarBadge() {
         guard let button = statusItem?.button else { return }
-        button.title = Preferences.shared.translationBackend.sendsDataOffDevice ? "  ☁" : ""
+        button.title = ""
     }
 
     /// 根据当前状态刷新菜单的动态文案（模式名 + 暂停/恢复）。
