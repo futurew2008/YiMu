@@ -65,19 +65,15 @@ open build/YiMu.app
 ```
 
 - 默认用钥匙串里已有的「Apple Development / Developer ID」证书签名（Hardened Runtime 已启用）。
-- **发布公证版**（生成已公证的 dmg）：
+- **发布公证版**（生成已公证、可直接分发的 dmg）：
   ```bash
-  # 方式 A：app 专用密码
-  export APPLE_ID=你的AppleID
-  export APPLE_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-  NOTARIZE=1 ./build-app.sh
-
-  # 方式 B：App Store Connect API 密钥
-  export APPLE_API_KEY=/绝对路径/AuthKey_XXXX.p8
-  export APPLE_API_ISSUER=你的发行商ID
-  NOTARIZE=1 ./build-app.sh
+  # 推荐：凭据存入钥匙串，密码不进 shell 历史、不落环境变量
+  xcrun notarytool store-credentials "yimu" --apple-id 你的AppleID --team-id 你的TeamID
+  NOTARY_PROFILE=yimu NOTARIZE=1 bash build-app.sh
   ```
-  凭据**只通过环境变量传入，不写进脚本、不进仓库**。生成 `build/YiMu.dmg` 即为可直接分发成品。
+  也支持另外两种：交互输入 App 专用密码（只设 `APPLE_ID`，脚本会提示输入）、App Store Connect API 密钥（`APPLE_API_KEY` + `APPLE_API_KEY_ID`，团队密钥再加 `APPLE_API_ISSUER`）。
+
+  凭据只通过钥匙串或环境变量传入，不写进脚本、不进仓库。产出 `build/YiMu.dmg` 即为可直接分发成品：app 与 dmg 容器均已用 Developer ID 签名，并已钉入公证票据。
 
 ## 隐私
 
