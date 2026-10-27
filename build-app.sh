@@ -104,25 +104,68 @@ echo "  open \"$(pwd)/build/YiMu.app\""
 #
 # 前置（凭据全部走环境变量，绝不写进脚本 / 仓库，守住私钥红线）：
 #   A. Developer ID Application 证书：在 developer.apple.com 申请并装进钥匙串。
-#   B. 二选一设置 notarytool 凭据：
-#        · app 专用密码：export APPLE_ID=你的AppleID  APPLE_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
-#        · API 密钥：     export APPLE_API_KEY=/绝对路径/AuthKey_XXXX.p8  APPLE_API_ISSUER=发行商ID
+#   B. 三选一设置 notarytool 凭据（凭据全部走环境变量或钥匙串，绝不写进脚本 / 仓库）：
+#        · 钥匙串配置（最省事，密码不进历史）：先执行一次
+#             xcrun notarytool store-credentials "yimu" --apple-id 你的AppleID --team-id S736GRAMX5
+#           之后每次只需：export NOTARY_PROFILE=yimu
+#        · App 专用密码：export APPLE_ID=你的AppleID   （密码留空，脚本会交互式提示输入）
+#        · API 密钥：    export APPLE_API_KEY=~/.appstoreconnect/private_keys/AuthKey_XXXXXXXXXX.p8
+#                        export APPLE_API_KEY_ID=XXXXXXXXXX        # 必填，Key ID
+#                        export APPLE_API_ISSUER=xxxxxxxx-xxxx-... # 团队密钥（Team Key）才需要
 #   C. TEAM_ID 默认 S736GRAMX5，可用环境变量覆盖。
 #
 # 用法：NOTARIZE=1 ./build-app.sh
 # ============================================================================
 if [ "${NOTARIZE:-0}" = "1" ]; then
   TEAM_ID="${TEAM_ID:-S736GRAMX5}"
-  if [ -z "$APPLE_ID" ] && [ -z "$APPLE_API_KEY" ]; then
+  # 允许在 APPLE_API_KEY 里写 ~/xxx（双引号不会展开波浪号，这里手动展开）。
+  APPLE_API_KEY="${APPLE_API_KEY/#\~/$HOME}"
+  if [ -z "$APPLE_ID" ] && [ -z "$APPLE_API_KEY" ] && [ -z "$NOTARY_PROFILE" ]; then
     echo "⚠️ NOTARIZE=1 但未设置 APPLE_ID / APPLE_API_KEY，跳过公证。"
     echo "   请按本脚本顶部说明配置 notarytool 凭据后再试。"
+  elif [ -n "$APPLE_API_KEY" ] && { [ -z "$APPLE_API_KEY_ID" ] || [ ! -f "$APPLE_API_KEY" ]; }; then
+    # API 密钥路径缺 --key-id 认证必失败；文件不存在也别白跑一遍构建。
+    echo "❌ API 密钥凭据不完整："
+    [ -f "$APPLE_API_KEY" ] || echo "   · 找不到 .p8 文件：$APPLE_API_KEY"
+    [ -n "$APPLE_API_KEY_ID" ] || echo "   · 未设置 APPLE_API_KEY_ID（Key ID，10 位左右）"
+    echo "   正确写法：export APPLE_API_KEY=~/.appstoreconnect/private_keys/AuthKey_XXXX.p8"
+    echo "             export APPLE_API_KEY_ID=XXXX  [export APPLE_API_ISSUER=团队IssuerID]"
+    exit 1
   else
+    # 用 Apple ID 认证但没给密码时，改为运行时交互输入（不回显、不进 shell 历史、不落环境变量）。
+    if [ -z "$APPLE_API_KEY" ] && [ -z "$APPLE_APP_PASSWORD" ] && [ -z "$NOTARY_PROFILE" ]; then
+      printf "▶ 请输入 App 专用密码（输入不回显，不会写入历史）："
+      # read 在 EOF / Ctrl-D 时返回非零，配合 set -e 会直接杀脚本，必须忽略其退出码。
+      read -r -s APPLE_APP_PASSWORD || true
+      echo
+      if [ -z "$APPLE_APP_PASSWORD" ]; then
+        echo "❌ 未输入密码，已取消。"
+        exit 1
+      fi
+    fi
     DMG="build/YiMu.dmg"
     echo "▶ 打包 dmg…"
     hdiutil create -volname "译幕 YiMu" -srcfolder "$APP" -ov -format UDZO "$DMG"
+    # dmg 容器本身也必须用 Developer ID 签名：
+    # 用户下载的 dmg 带隔离属性，双击挂载时 Gatekeeper 判定的是 dmg 容器而不是里面的 app，
+    # 未签名的 dmg 会得到 "no usable signature" 而被拦（内含 app 已公证也没用）。
+    if [ -n "$IDENTITY" ]; then
+      echo "▶ 签名 dmg 容器…"
+      codesign --force --sign "$IDENTITY" --timestamp "$DMG"
+    else
+      echo "⚠️ 无签名身份，跳过 dmg 签名（Gatekeeper 可能在挂载这一步拦截）。"
+    fi
     echo "▶ 提交公证（notarytool，可能需等待数十秒到几分钟）…"
-    if [ -n "$APPLE_API_KEY" ]; then
-      xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --team-id "$TEAM_ID" --wait
+    if [ -n "$NOTARY_PROFILE" ]; then
+      # 凭据事先由 `xcrun notarytool store-credentials` 存入钥匙串，这里只按名字引用。
+      xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    elif [ -n "$APPLE_API_KEY" ]; then
+      # Team Key 需要 --issuer；Individual Key 则必须不传 --issuer，故按是否设置动态拼参数。
+      ISSUER_ARGS=()
+      if [ -n "$APPLE_API_ISSUER" ]; then
+        ISSUER_ARGS=(--issuer "$APPLE_API_ISSUER")
+      fi
+      xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" "${ISSUER_ARGS[@]}" --wait
     else
       xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$TEAM_ID" --wait
     fi
