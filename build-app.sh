@@ -30,6 +30,11 @@ else
   echo "⚠️ 未找到 yi.png，设置侧栏图标将回退为 app 图标。"
 fi
 
+# Info.plist 里的两个 TCC 说明字符串是**外发硬前提**，勿删：
+#   NSScreenCaptureUsageDescription —— app 调用了 CGRequestScreenCaptureAccess / ScreenCaptureKit，
+#     缺这个 key 系统不但不弹授权框，还会直接把 app 终止（terminated）。
+#   NSAppleEventsUsageDescription —— 辅助功能读取他窗文字，「想要控制」类提示会显示这段用途说明。
+# 版本号：CFBundleShortVersionString（对外 1.0）/ CFBundleVersion（build 号），发布前在此定稿。
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,12 +43,15 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 <key>CFBundleDisplayName</key><string>译幕</string>
 <key>CFBundleIdentifier</key><string>com.weilai.yimu</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>CFBundleShortVersionString</key><string>0.2</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleExecutable</key><string>YiMu</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+<key>NSScreenCaptureUsageDescription</key><string>译幕需要「屏幕录制」权限来读取屏幕上的文字，以便识别并翻译。画面仅在本机处理，不会上传任何内容。</string>
+<key>NSAppleEventsUsageDescription</key><string>译幕使用「辅助功能」读取其他 App 界面上的文字用于翻译，全程在你的 Mac 上完成。</string>
 </dict></plist>
 EOF
 
