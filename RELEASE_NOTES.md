@@ -10,7 +10,7 @@
 ## 下载与安装
 
 - **系统要求**：macOS 15（Sequoia）或更高，Apple 芯片 / Intel 均可。
-- 下载 `YiMu.dmg`，双击后把「译幕」拖进「应用程序」。
+- 下载 [`YiMu.dmg`](https://github.com/futurew2008/YiMu/releases/download/v1.0/YiMu.dmg)（3,237,969 字节），双击后把「译幕」拖进「应用程序」。
 - 首次打开：已签名 + 苹果公证 + 票据钉入，正常情况下直接双击即可运行，不会出现"无法验证开发者"。
 - 首次启用翻译时，按提示到 **系统设置 → 隐私与安全性** 授予「辅助功能」与「屏幕录制」两项权限，重启译幕。
 
@@ -28,6 +28,14 @@ spctl -a -vv /Applications/译幕.app
 # 比对校验和
 shasum -a 256 YiMu.dmg
 ```
+
+本版 `YiMu.dmg` 的 SHA-256 应为：
+
+```
+08569d7a9eb86682a7ee275172748a65d0267c0ff783913fdf80fb14c08c8b59
+```
+
+`shasum -a 256 YiMu.dmg` 的输出必须与上面**逐字符一致**，不一致说明下载被篡改或损坏，请重新下载。
 
 ---
 

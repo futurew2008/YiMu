@@ -5,6 +5,8 @@
 
 > 译幕**完全在本机运行**：翻译走 Apple 设备端框架，零联网、零数据收集。详见 [PRIVACY.md](./PRIVACY.md)。
 
+**下载**：[最新版本 v1.0](https://github.com/futurew2008/YiMu/releases/latest)（`YiMu.dmg`，约 3.1 MB）　·　**系统要求**：macOS 15+
+
 ---
 
 ## 功能特性
@@ -41,7 +43,7 @@
 
 ## 安装（普通用户）
 
-1. 到 [Releases](../../releases) 下载 `YiMu.dmg`。
+1. 到 [Releases](https://github.com/futurew2008/YiMu/releases/latest) 下载 `YiMu.dmg`（约 3.1 MB）。
 2. 双击打开 dmg，把「译幕」拖到「应用程序」。
 3. 首次打开：译幕已**签名并公证**（Developer ID + 苹果公证 + 票据已钉入），
    正常情况下直接双击即可打开，不会再有"无法验证开发者"的拦截。
