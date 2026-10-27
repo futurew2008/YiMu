@@ -44,7 +44,7 @@
 ## 安装（普通用户）
 
 1. 到 [Releases](https://github.com/futurew2008/YiMu/releases/latest) 下载 `YiMu.dmg`（约 3.1 MB）。
-2. 双击打开 dmg，把「译幕」拖到「应用程序」。
+2. 双击打开 dmg，把「译幕」拖到「应用程序」。（Finder 里显示为「译幕」，终端里的实际路径是 `/Applications/YiMu.app`）
 3. 首次打开：译幕已**签名并公证**（Developer ID + 苹果公证 + 票据已钉入），
    正常情况下直接双击即可打开，不会再有"无法验证开发者"的拦截。
    若你的网络无法联系苹果导致票据校验失败，可右键 → 打开 或在

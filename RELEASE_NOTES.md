@@ -22,9 +22,9 @@
 
 ```bash
 # 确认签名有效
-codesign -dvv /Applications/译幕.app 2>&1 | grep -E "Authority|TeamIdentifier"
+codesign -dvv /Applications/YiMu.app 2>&1 | grep -E "Authority|TeamIdentifier"
 # 确认通过了苹果公证（Gatekeeper 评估）
-spctl -a -vv /Applications/译幕.app
+spctl -a -vv /Applications/YiMu.app
 # 比对校验和
 shasum -a 256 YiMu.dmg
 ```
