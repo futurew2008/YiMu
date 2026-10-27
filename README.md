@@ -59,7 +59,7 @@
 环境：macOS 15+，Swift 6（Xcode 命令行工具或 Xcode 26）。
 
 ```bash
-git clone <本仓库地址> YiMu && cd YiMu
+git clone https://github.com/futurew2008/YiMu.git && cd YiMu
 bash build-app.sh
 open build/YiMu.app
 ```
