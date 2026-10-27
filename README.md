@@ -7,6 +7,25 @@
 
 **下载**：[最新版本 v1.0](https://github.com/futurew2008/YiMu/releases/latest)（`YiMu.dmg`，约 3.1 MB）　·　**系统要求**：macOS 15+
 
+## 预览
+
+**屏幕融合**——整屏界面一键翻译。英文菜单原文（左）与译文遮挡块替换后（右）：
+
+| 原文 | 译幕后 |
+|---|---|
+| ![Final Draft 英文菜单](docs/screenshots/menu-before.jpg) | ![Final Draft 菜单被译文覆盖](docs/screenshots/menu-after.jpg) |
+| ![Edit 菜单展开（英文）](docs/screenshots/menu-edit-before.jpg) | ![Edit 菜单被译文覆盖](docs/screenshots/menu-edit-after.jpg) |
+
+**网页同样适用**——Safari 里的 IMDb 页面，正文与新闻逐块替换：
+
+| 原文 | 译幕后 |
+|---|---|
+| ![IMDb 页面原文](docs/screenshots/web-before.jpg) | ![IMDb 页面被译文覆盖](docs/screenshots/web-after.jpg) |
+
+**设置页**——左侧五个分区，全程本机运行：
+
+![译幕设置页](docs/screenshots/settings.png)
+
 ---
 
 ## 功能特性
